@@ -8,6 +8,7 @@ Framework genérico para executar migrações em massa em repositórios .NET usa
 .claude/
 ├── skills/
 │   ├── migrate/SKILL.md              # /migrate — orquestrador genérico
+│   ├── migrate-owner/SKILL.md        # /migrate-owner — verifica e corrige CODEOWNERS
 │   └── migrate-mediatr/
 │       ├── SKILL.md                  # /migrate-mediatr — receita MediatR
 │       └── detect.sh                 # detecta se o repo precisa da migração
@@ -19,6 +20,7 @@ Framework genérico para executar migrações em massa em repositórios .NET usa
 repos.txt                             # Repos pendentes (owner/repo, um por linha)
 done.txt                              # Repos migrados com sucesso
 skipped.txt                           # Repos pulados (não-.NET ou sem necessidade)
+owner-report.txt                      # Repos com owner inesperado no CODEOWNERS
 migrate.sh                            # Orquestrador shell para execução em massa
 ```
 
@@ -44,6 +46,11 @@ repos.txt
    │
    ├─── clone/pull repo
    │
+   ├─── [1º] check CODEOWNERS owner:
+   │         @neon/cards          → PR de fix (branch: fix/update-codeowners-owner)
+   │         @neon/cards-engagement → ok
+   │         outro / ausente      → owner-report.txt
+   │
    ├─── tem .csproj? ──── NÃO ──→ skipped.txt  (# not-dotnet)
    │
    ├─── detect.sh passa? ─ NÃO ──→ skipped.txt  (# not-needed:<tipo>)
@@ -54,9 +61,12 @@ repos.txt
 
 ## Migrações disponíveis
 
-| Skill | Descrição | Branch |
+| Skill | Descrição | Branch / PR |
 |---|---|---|
+| `/migrate-owner` | Verifica CODEOWNERS: `@neon/cards` → `@neon/cards-engagement` | `fix/update-codeowners-owner` |
 | `/migrate-mediatr` | Remove MediatR → dispatcher nativo | `migration/remove-mediatr` |
+
+A verificação de owner sempre roda primeiro, independente do tipo de migração.
 
 Para adicionar uma nova migração, crie:
 - `.claude/skills/migrate-{nome}/SKILL.md` — receita da migração

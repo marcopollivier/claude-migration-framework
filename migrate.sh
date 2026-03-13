@@ -51,6 +51,7 @@ LOG_DIR="$BASE_DIR/logs"
 SKILL_DIR="$BASE_DIR/.claude/skills/migrate-${MIGRATION_TYPE}"
 DONE_FILE="$BASE_DIR/done.txt"
 SKIPPED_FILE="$BASE_DIR/skipped.txt"
+OWNER_REPORT_FILE="$BASE_DIR/owner-report.txt"
 LOCK_FILE="$BASE_DIR/.migrate.lock"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -73,7 +74,7 @@ if [ ! -f "$REPOS_FILE" ]; then
 fi
 
 mkdir -p "$WORK_DIR" "$LOG_DIR"
-touch "$DONE_FILE" "$SKIPPED_FILE"
+touch "$DONE_FILE" "$SKIPPED_FILE" "$OWNER_REPORT_FILE"
 
 # Read repos (skip empty lines and comments)
 mapfile -t ALL_REPOS < <(grep -v '^\s*#' "$REPOS_FILE" | grep -v '^\s*$')
@@ -104,9 +105,10 @@ echo -e " Workdir:      $WORK_DIR"
 echo -e " Logs:         $LOG_DIR"
 echo -e ""
 echo -e " Tracking:"
-echo -e "   repos.txt   → pending / failed"
-echo -e "   done.txt    → migrated successfully"
-echo -e "   skipped.txt → not-.NET or migration not needed"
+echo -e "   repos.txt      → pending / failed"
+echo -e "   done.txt       → migrated successfully"
+echo -e "   skipped.txt    → not-.NET or migration not needed"
+echo -e "   owner-report.txt → repos with unexpected owner"
 echo ""
 
 # ─── Tracking (concurrency-safe via flock) ───────────────────────────
@@ -133,7 +135,104 @@ update_tracking() {
     ) 9>"$LOCK_FILE"
 }
 export -f update_tracking
-export REPOS_FILE DONE_FILE SKIPPED_FILE LOCK_FILE
+export REPOS_FILE DONE_FILE SKIPPED_FILE OWNER_REPORT_FILE LOCK_FILE
+
+# ─── Check and fix CODEOWNERS owner (always runs first, independent of migration type) ───
+check_and_fix_owner() {
+    local repo="$1"
+    local repo_name
+    repo_name=$(basename "$repo")
+    local repo_dir="$WORK_DIR/$repo_name"
+    local log_file="$LOG_DIR/${repo_name}_owner_${TIMESTAMP}.log"
+
+    # Find CODEOWNERS file (standard locations)
+    local codeowners_file=""
+    for candidate in \
+        "$repo_dir/.github/CODEOWNERS" \
+        "$repo_dir/CODEOWNERS" \
+        "$repo_dir/docs/CODEOWNERS"; do
+        if [ -f "$candidate" ]; then
+            codeowners_file="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$codeowners_file" ]; then
+        echo -e "${YELLOW}[$repo_name]${NC} ⚠️  No CODEOWNERS file — reported"
+        (
+            flock 9
+            echo "$repo  # no CODEOWNERS file found" >> "$OWNER_REPORT_FILE"
+        ) 9>"$LOCK_FILE"
+        return 0
+    fi
+
+    # @neon/cards-engagement — already correct, nothing to do
+    if grep -qE '@neon/cards-engagement' "$codeowners_file"; then
+        echo -e "${GREEN}[$repo_name]${NC} ✅ Owner already @neon/cards-engagement"
+        return 0
+    fi
+
+    # @neon/cards (but NOT @neon/cards-engagement) — open a PR to fix
+    if grep -qE '@neon/cards([^-]|$)' "$codeowners_file"; then
+        echo -e "${YELLOW}[$repo_name]${NC} 🔄 Owner is @neon/cards — creating fix PR..."
+        (
+            cd "$repo_dir"
+            git checkout main 2>/dev/null || git checkout master 2>/dev/null
+            git pull
+            git checkout -b fix/update-codeowners-owner
+
+            # Replace @neon/cards with @neon/cards-engagement (word-boundary safe via perl)
+            perl -i -pe 's/\@neon\/cards(?!-engagement)/\@neon\/cards-engagement/g' \
+                "$codeowners_file"
+
+            git add "$codeowners_file"
+            git commit -m "$(cat <<'EOF'
+fix: update CODEOWNERS owner to @neon/cards-engagement
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)"
+            git push -u origin fix/update-codeowners-owner
+
+            gh pr create \
+                --title "fix: update CODEOWNERS owner to @neon/cards-engagement" \
+                --body "$(cat <<'EOF'
+## Summary
+
+- Updates `CODEOWNERS` replacing `@neon/cards` → `@neon/cards-engagement`
+
+## Test plan
+
+- [ ] CODEOWNERS contains `@neon/cards-engagement`
+- [ ] No remaining references to bare `@neon/cards`
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+        ) >> "$log_file" 2>&1
+
+        local pr_url
+        pr_url=$(grep -o 'https://github\.com[^[:space:]]*pull[^[:space:]]*' "$log_file" | tail -1)
+        if [ -n "$pr_url" ]; then
+            echo -e "${GREEN}[$repo_name]${NC} ✅ Owner fix PR: $pr_url"
+        else
+            echo -e "${RED}[$repo_name]${NC} ❌ Owner fix PR failed — check $log_file"
+        fi
+        return 0
+    fi
+
+    # Some other owner — report it
+    local owners
+    owners=$(grep -oE '@[a-zA-Z0-9/_-]+' "$codeowners_file" | sort -u | tr '\n' ' ')
+    echo -e "${YELLOW}[$repo_name]${NC} ⚠️  Unexpected owner(s): $owners — reported"
+    (
+        flock 9
+        echo "$repo  # owners: $owners" >> "$OWNER_REPORT_FILE"
+    ) 9>"$LOCK_FILE"
+    return 0
+}
+export -f check_and_fix_owner
+export TIMESTAMP
 
 # ─── Migrate a single repo ───────────────────────────────────────────
 migrate_repo() {
@@ -160,7 +259,10 @@ migrate_repo() {
         fi
     fi
 
-    # ── Check 1: is this a .NET project? ───────────────────────────
+    # ── Check 1: owner verification (always first, independent of migration) ──
+    check_and_fix_owner "$repo"
+
+    # ── Check 2: is this a .NET project? ───────────────────────────
     if ! find "$repo_dir" -name "*.csproj" -maxdepth 6 2>/dev/null | grep -q .; then
         echo -e "${YELLOW}[$repo_name]${NC} ⏭️  Not a .NET project — skipping"
         echo "skipped:not-dotnet" > "$disp_file"
@@ -168,7 +270,7 @@ migrate_repo() {
         return 0
     fi
 
-    # ── Check 2: does this project need the migration? ─────────────
+    # ── Check 3: does this project need the migration? ─────────────
     local detect_script="$SKILL_DIR/detect.sh"
     if [ -f "$detect_script" ]; then
         if ! bash "$detect_script" "$repo_dir" >> "$log_file" 2>&1; then
@@ -329,6 +431,13 @@ done
 if [ "$REMAINING" -gt 0 ]; then
     echo ""
     echo -e "${YELLOW}  ℹ️  ${REMAINING} repo(s) remaining in repos.txt — run again to continue${NC}"
+fi
+
+# Owner report summary
+OWNER_REPORT_COUNT=$(grep -v '^\s*$' "$OWNER_REPORT_FILE" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$OWNER_REPORT_COUNT" -gt 0 ]; then
+    echo ""
+    echo -e "${YELLOW} ⚠️  ${OWNER_REPORT_COUNT} repo(s) with unexpected owners → owner-report.txt${NC}"
 fi
 
 echo ""
