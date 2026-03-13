@@ -33,29 +33,60 @@ public interface IRequestHandler<TRequest, TResponse> where TRequest : IRequest<
 ```
 
 ### Infrastructure/IDispatcher.cs
+Interface totalmente genérica — sem `dynamic`, com segurança de tipos em tempo de compilação:
 ```csharp
 namespace {Namespace}.Infrastructure;
 public interface IDispatcher
 {
-    Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default);
+    Task<TResponse> Send<TRequest, TResponse>(TRequest request, CancellationToken cancellationToken = default)
+        where TRequest : IRequest<TResponse>;
 }
 ```
 
 ### Infrastructure/Dispatcher.cs
+Implementação sem reflection nem `dynamic` — o handler é resolvido diretamente pelo tipo genérico:
 ```csharp
 namespace {Namespace}.Infrastructure;
 public class Dispatcher : IDispatcher
 {
     private readonly IServiceProvider _serviceProvider;
+
     public Dispatcher(IServiceProvider serviceProvider)
     {
         _serviceProvider = serviceProvider;
     }
-    public async Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default)
+
+    public async Task<TResponse> Send<TRequest, TResponse>(TRequest request, CancellationToken cancellationToken = default)
+        where TRequest : IRequest<TResponse>
     {
-        var handlerType = typeof(IRequestHandler<,>).MakeGenericType(request.GetType(), typeof(TResponse));
-        dynamic handler = _serviceProvider.GetRequiredService(handlerType);
-        return await handler.Handle((dynamic)request, cancellationToken);
+        var handler = _serviceProvider.GetService<IRequestHandler<TRequest, TResponse>>()
+            ?? throw new InvalidOperationException(
+                $"No handler registered for '{typeof(TRequest).Name}'. " +
+                $"Make sure IRequestHandler<{typeof(TRequest).Name}, {typeof(TResponse).Name}> is registered in the DI container.");
+        return await handler.Handle(request, cancellationToken);
+    }
+}
+```
+
+### Infrastructure/ServiceCollectionExtensions.cs
+Registro automático de handlers via assembly scanning — evita registros hardcoded que quebram em runtime:
+```csharp
+namespace {Namespace}.Infrastructure;
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddHandlers(this IServiceCollection services, Assembly assembly)
+    {
+        var handlerInterface = typeof(IRequestHandler<,>);
+        var handlers = assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract)
+            .SelectMany(t => t.GetInterfaces()
+                .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == handlerInterface)
+                .Select(i => (Handler: t, Interface: i)));
+
+        foreach (var (handler, iface) in handlers)
+            services.AddScoped(iface, handler);
+
+        return services;
     }
 }
 ```
@@ -75,19 +106,31 @@ public class Dispatcher : IDispatcher
 - Substituir `IMediator` por `IDispatcher`
 - Substituir `_mediator` por `_dispatcher`
 - Substituir `using MediatR;` por `using {Namespace}.Infrastructure;`
+- Atualizar chamadas: `await _dispatcher.Send(request)` → `await _dispatcher.Send<TRequest, TResponse>(request)`
+  - Exemplo: `await _dispatcher.Send<GetCampaignQuery, CampaignDto>(query, cancellationToken)`
 
-### No Program.cs:
+### No Program.cs / módulo de IoC:
 - Remover `builder.Services.AddMediatR(...)`
-- Adicionar `builder.Services.AddScoped<IDispatcher, Dispatcher>();`
-- Registrar cada handler individualmente:
-  `builder.Services.AddScoped<IRequestHandler<CreateXxxCommand, Guid>, CreateXxxCommandHandler>();`
+- Substituir registros individuais de handlers pelo scanning automático:
+```csharp
+using {Namespace}.Infrastructure;
+using System.Reflection;
+
+builder.Services.AddScoped<IDispatcher, Dispatcher>();
+builder.Services.AddHandlers(typeof({SomeHandler}).Assembly);
+```
+- Remover quaisquer linhas `AddScoped<IRequestHandler<...>>` hardcoded
 
 ### No .csproj:
 - Executar `dotnet remove package MediatR`
+- Executar `dotnet remove package MediatR.Extensions.Microsoft.DependencyInjection` (se presente)
 
 ## Nos testes (se existirem):
 - Mesmas substituições de using e interfaces
-- Remover `dotnet remove package MediatR` do projeto de testes também
+- Substituir mocks de `IMediator` por mocks de `IDispatcher`
+- Verificar chamadas: `.Send<TRequest, TResponse>(...)` em vez de `.Send(...)`
+- Remover pacotes MediatR dos projetos de teste também
+- Nomear helpers de verificação corretamente: usar `ShouldSendToDispatcherAtLeastOnce` (não `ShouldSentTo...`)
 
 ## Branch e PR
 
