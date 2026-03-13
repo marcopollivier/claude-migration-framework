@@ -76,8 +76,13 @@ fi
 mkdir -p "$WORK_DIR" "$LOG_DIR"
 touch "$DONE_FILE" "$SKIPPED_FILE" "$OWNER_REPORT_FILE"
 
-# Read repos (skip empty lines and comments)
-mapfile -t ALL_REPOS < <(grep -v '^\s*#' "$REPOS_FILE" | grep -v '^\s*$')
+# Read repos (skip empty lines and comments) — bash 3.2 compatible, strips \r
+ALL_REPOS=()
+while IFS= read -r line; do
+    line="${line%$'\r'}"  # strip carriage return if CRLF file
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    ALL_REPOS+=("$line")
+done < "$REPOS_FILE"
 
 if [ "${#ALL_REPOS[@]}" -eq 0 ]; then
     echo -e "${GREEN}Nothing to do — repos.txt is empty.${NC}"
@@ -111,30 +116,6 @@ echo -e "   skipped.txt    → not-.NET or migration not needed"
 echo -e "   owner-report.txt → repos with unexpected owner"
 echo ""
 
-# ─── Tracking (concurrency-safe via flock) ───────────────────────────
-update_tracking() {
-    local repo="$1"
-    local disposition="$2"  # done | skipped
-    local reason="${3:-}"
-
-    (
-        flock 9
-        # Remove from repos.txt atomically
-        grep -v "^${repo}[[:space:]]*$\|^${repo}[[:space:]]*#" "$REPOS_FILE" \
-            > "${REPOS_FILE}.tmp" && mv "${REPOS_FILE}.tmp" "$REPOS_FILE"
-        # Append to target file
-        if [ "$disposition" = "done" ]; then
-            echo "$repo" >> "$DONE_FILE"
-        else
-            if [ -n "$reason" ]; then
-                echo "$repo  # $reason" >> "$SKIPPED_FILE"
-            else
-                echo "$repo" >> "$SKIPPED_FILE"
-            fi
-        fi
-    ) 9>"$LOCK_FILE"
-}
-export -f update_tracking
 export REPOS_FILE DONE_FILE SKIPPED_FILE OWNER_REPORT_FILE LOCK_FILE
 
 # ─── Check and fix CODEOWNERS owner (always runs first, independent of migration type) ───
@@ -159,10 +140,8 @@ check_and_fix_owner() {
 
     if [ -z "$codeowners_file" ]; then
         echo -e "${YELLOW}[$repo_name]${NC} ⚠️  No CODEOWNERS file — reported"
-        (
-            flock 9
-            echo "$repo  # no CODEOWNERS file found" >> "$OWNER_REPORT_FILE"
-        ) 9>"$LOCK_FILE"
+        echo "$repo  # no CODEOWNERS file found" \
+            > "$LOG_DIR/${repo_name}_owner_${TIMESTAMP}.owner_report"
         return 0
     fi
 
@@ -225,10 +204,8 @@ EOF
     local owners
     owners=$(grep -oE '@[a-zA-Z0-9/_-]+' "$codeowners_file" | sort -u | tr '\n' ' ')
     echo -e "${YELLOW}[$repo_name]${NC} ⚠️  Unexpected owner(s): $owners — reported"
-    (
-        flock 9
-        echo "$repo  # owners: $owners" >> "$OWNER_REPORT_FILE"
-    ) 9>"$LOCK_FILE"
+    echo "$repo  # owners: $owners" \
+        > "$LOG_DIR/${repo_name}_owner_${TIMESTAMP}.owner_report"
     return 0
 }
 export -f check_and_fix_owner
@@ -266,7 +243,6 @@ migrate_repo() {
     if ! find "$repo_dir" -name "*.csproj" -maxdepth 6 2>/dev/null | grep -q .; then
         echo -e "${YELLOW}[$repo_name]${NC} ⏭️  Not a .NET project — skipping"
         echo "skipped:not-dotnet" > "$disp_file"
-        update_tracking "$repo" "skipped" "not-dotnet"
         return 0
     fi
 
@@ -276,7 +252,6 @@ migrate_repo() {
         if ! bash "$detect_script" "$repo_dir" >> "$log_file" 2>&1; then
             echo -e "${YELLOW}[$repo_name]${NC} ⏭️  No migration needed — skipping"
             echo "skipped:not-needed" > "$disp_file"
-            update_tracking "$repo" "skipped" "not-needed:${MIGRATION_TYPE}"
             return 0
         fi
     fi
@@ -322,7 +297,6 @@ IMPORTANT:
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}[$repo_name]${NC} ✅ Migration completed"
         echo "done" > "$disp_file"
-        update_tracking "$repo" "done"
     else
         echo -e "${RED}[$repo_name]${NC} ❌ Migration failed — stays in repos.txt for retry"
         echo "failed:migration-error" > "$disp_file"
@@ -343,9 +317,13 @@ RUNNING=0
 
 for repo in "${REPOS[@]}"; do
     if [ "$MAX_PARALLEL" -gt 0 ]; then
+        # bash 3.2 compatible: poll until a slot opens
         while [ "$RUNNING" -ge "$MAX_PARALLEL" ]; do
-            wait -n 2>/dev/null || true
-            RUNNING=$((RUNNING - 1))
+            RUNNING=0
+            for _pid in "${PIDS[@]}"; do
+                kill -0 "$_pid" 2>/dev/null && RUNNING=$((RUNNING + 1))
+            done
+            [ "$RUNNING" -ge "$MAX_PARALLEL" ] && sleep 0.5
         done
     fi
 
@@ -373,15 +351,36 @@ for i in "${!PIDS[@]}"; do
     disp="unknown"
     [ -f "$disp_file" ] && disp=$(cat "$disp_file")
 
+    # ── Update tracking files sequentially (no concurrency issues) ──
     case "$disp" in
-        done)            ((SUCCEEDED++)) ;;
-        skipped:*)       ((SKIPPED_COUNT++)) ;;
-        failed:*|unknown) ((FAILED++)) ;;
+        done)
+            ((SUCCEEDED++))
+            grep -vE "^${repo}[[:space:]]*(#.*)?$" "$REPOS_FILE" \
+                > "${REPOS_FILE}.tmp" || true
+            mv "${REPOS_FILE}.tmp" "$REPOS_FILE"
+            echo "$repo" >> "$DONE_FILE"
+            ;;
+        skipped:*)
+            ((SKIPPED_COUNT++))
+            reason="${disp#skipped:}"
+            grep -vE "^${repo}[[:space:]]*(#.*)?$" "$REPOS_FILE" \
+                > "${REPOS_FILE}.tmp" || true
+            mv "${REPOS_FILE}.tmp" "$REPOS_FILE"
+            echo "$repo  # $reason" >> "$SKIPPED_FILE"
+            ;;
+        failed:*|unknown)
+            ((FAILED++))
+            ;;
     esac
 done
 
+# Collect owner reports written by subprocesses
+for f in "$LOG_DIR"/*_owner_${TIMESTAMP}.owner_report; do
+    [ -f "$f" ] && cat "$f" >> "$OWNER_REPORT_FILE"
+done
+
 # ─── Summary ─────────────────────────────────────────────────────────
-REMAINING=$(grep -v '^\s*#' "$REPOS_FILE" 2>/dev/null | grep -v '^\s*$' | wc -l | tr -d ' ')
+REMAINING=$({ grep -v '^\s*#' "$REPOS_FILE" 2>/dev/null | grep -v '^\s*$' || true; } | wc -l | tr -d ' ')
 
 echo ""
 echo -e "${CYAN}══════════════════════════════════════════${NC}"
@@ -434,7 +433,7 @@ if [ "$REMAINING" -gt 0 ]; then
 fi
 
 # Owner report summary
-OWNER_REPORT_COUNT=$(grep -v '^\s*$' "$OWNER_REPORT_FILE" 2>/dev/null | wc -l | tr -d ' ')
+OWNER_REPORT_COUNT=$({ grep -v '^\s*$' "$OWNER_REPORT_FILE" 2>/dev/null || true; } | wc -l | tr -d ' ')
 if [ "$OWNER_REPORT_COUNT" -gt 0 ]; then
     echo ""
     echo -e "${YELLOW} ⚠️  ${OWNER_REPORT_COUNT} repo(s) with unexpected owners → owner-report.txt${NC}"
