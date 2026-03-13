@@ -1,0 +1,31 @@
+# Workspaces de migração (repos clonados)
+workspaces/
+
+# Projetos de exemplo usados na POC
+projects/
+
+# Logs de execução
+logs/
+
+# Build artifacts .NET
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings (contém permissões pessoais)
+.claude/settings.local.json
+
+# Solution file gerado na POC
+*.sln
