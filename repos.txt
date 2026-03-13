@@ -1,2 +1,0 @@
-marcopollivier/poc-order-service
-marcopollivier/poc-product-service

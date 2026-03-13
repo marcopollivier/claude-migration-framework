@@ -1,28 +1,35 @@
 #!/bin/bash
 # migrate.sh - Orquestra migração em massa usando Claude Code agents em paralelo
 #
-# Uso: ./migrate.sh <tipo-migracao> [repos.txt] [--max-parallel N] [--batch-size N]
+# Uso: ./migrate.sh <tipo-migracao> [tracking/repos.txt] [--max-parallel N] [--batch-size N]
 #
 # Exemplos:
-#   ./migrate.sh mediatr                              # migra todos os repos de repos.txt
-#   ./migrate.sh mediatr repos.txt --batch-size 5    # processa apenas 5 repos por vez
-#   ./migrate.sh mediatr repos.txt --max-parallel 3  # limita paralelismo
-#   ./migrate.sh mediatr repos.txt --batch-size 5 --max-parallel 2
+#   ./migrate.sh mediatr                                        # migra todos os repos
+#   ./migrate.sh mediatr tracking/repos.txt --batch-size 5     # processa apenas 5 por vez
+#   ./migrate.sh mediatr tracking/repos.txt --max-parallel 3   # limita paralelismo
 #
-# Fluxo de saída dos repos:
-#   repos.txt  → done.txt     (migração aplicada com sucesso)
-#   repos.txt  → skipped.txt  (não-.NET ou migração não necessária)
-#   repos.txt  → repos.txt    (falha — permanece para reprocessamento)
+# Fluxo de saída dos repos (pasta tracking/):
+#   repos.txt  → done.txt         (migração aplicada com sucesso)
+#   repos.txt  → skipped.txt      (não-.NET ou migração não necessária)
+#   repos.txt  → owner-report.txt (owner inesperado no CODEOWNERS)
+#   repos.txt  → repos.txt        (falha — permanece para reprocessamento)
 
 set -euo pipefail
 
 # ─── Args ───────────────────────────────────────────────────────────
 MIGRATION_TYPE="${1:-}"
-REPOS_FILE="${2:-repos.txt}"
 MAX_PARALLEL=0  # 0 = sem limite
 BATCH_SIZE=0    # 0 = todos
 
-shift 2 2>/dev/null || true
+# Second arg is optional repos file — only if it doesn't start with '--'
+if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
+    REPOS_FILE="$2"
+    shift 2 2>/dev/null || true
+else
+    REPOS_FILE="tracking/repos.txt"
+    shift 1 2>/dev/null || true
+fi
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
@@ -32,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$MIGRATION_TYPE" ]; then
-    echo "Usage: ./migrate.sh <tipo-migracao> [repos.txt] [--max-parallel N] [--batch-size N]"
+    echo "Usage: ./migrate.sh <tipo-migracao> [tracking/repos.txt] [--max-parallel N] [--batch-size N]"
     echo ""
     echo "Migrações disponíveis:"
     for skill_dir in .claude/skills/migrate-*/; do
@@ -46,12 +53,13 @@ if [ -z "$MIGRATION_TYPE" ]; then
 fi
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+TRACKING_DIR="$BASE_DIR/tracking"
 WORK_DIR="$BASE_DIR/workspaces"
 LOG_DIR="$BASE_DIR/logs"
 SKILL_DIR="$BASE_DIR/.claude/skills/migrate-${MIGRATION_TYPE}"
-DONE_FILE="$BASE_DIR/done.txt"
-SKIPPED_FILE="$BASE_DIR/skipped.txt"
-OWNER_REPORT_FILE="$BASE_DIR/owner-report.txt"
+DONE_FILE="$TRACKING_DIR/done.txt"
+SKIPPED_FILE="$TRACKING_DIR/skipped.txt"
+OWNER_REPORT_FILE="$TRACKING_DIR/owner-report.txt"
 LOCK_FILE="$BASE_DIR/.migrate.lock"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -73,7 +81,7 @@ if [ ! -f "$REPOS_FILE" ]; then
     exit 1
 fi
 
-mkdir -p "$WORK_DIR" "$LOG_DIR"
+mkdir -p "$WORK_DIR" "$LOG_DIR" "$TRACKING_DIR"
 touch "$DONE_FILE" "$SKIPPED_FILE" "$OWNER_REPORT_FILE"
 
 # Read repos (skip empty lines and comments) — bash 3.2 compatible, strips \r

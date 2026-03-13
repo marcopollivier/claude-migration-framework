@@ -17,10 +17,11 @@ Framework genérico para executar migrações em massa em repositórios .NET usa
 ├── rules/
 │   └── dotnet.md                     # Padrões de código .NET (scoped *.cs)
 ├── settings.json                     # Hooks de guardrail
-repos.txt                             # Repos pendentes (owner/repo, um por linha)
-done.txt                              # Repos migrados com sucesso
-skipped.txt                           # Repos pulados (não-.NET ou sem necessidade)
-owner-report.txt                      # Repos com owner inesperado no CODEOWNERS
+tracking/
+├── repos.txt                         # Repos pendentes (owner/repo, um por linha)
+├── done.txt                          # Repos migrados com sucesso
+├── skipped.txt                       # Repos pulados (não-.NET ou sem necessidade)
+└── owner-report.txt                  # Repos com owner inesperado no CODEOWNERS
 migrate.sh                            # Orquestrador shell para execução em massa
 ```
 
@@ -69,6 +70,7 @@ repos.txt
 A verificação de owner sempre roda primeiro, independente do tipo de migração.
 
 Para adicionar uma nova migração, crie:
+
 - `.claude/skills/migrate-{nome}/SKILL.md` — receita da migração
 - `.claude/skills/migrate-{nome}/detect.sh` — retorna 0 se precisa migrar, 1 se já está ok
 
@@ -85,20 +87,22 @@ Para adicionar uma nova migração, crie:
 ## Uso em massa (headless)
 
 ```bash
-# Processa todos os repos de repos.txt
+# Processa todos os repos de tracking/repos.txt
 ./migrate.sh mediatr
 
 # Processa apenas 5 repos por vez (economiza créditos)
-./migrate.sh mediatr repos.txt --batch-size 5
+./migrate.sh mediatr tracking/repos.txt --batch-size 5
 
 # Com paralelismo limitado
-./migrate.sh mediatr repos.txt --batch-size 5 --max-parallel 2
+./migrate.sh mediatr tracking/repos.txt --batch-size 5 --max-parallel 2
 ```
 
-Repos são removidos de `repos.txt` automaticamente após cada resultado:
-- **Migrado** → `done.txt`
-- **Pulado** (não-.NET ou sem necessidade) → `skipped.txt`
-- **Falhou** → permanece em `repos.txt` para reprocessamento
+Repos são removidos de `tracking/repos.txt` automaticamente após cada resultado:
+
+- **Migrado** → `tracking/done.txt`
+- **Pulado** (não-.NET ou sem necessidade) → `tracking/skipped.txt`
+- **Owner inesperado** → `tracking/owner-report.txt`
+- **Falhou** → permanece em `tracking/repos.txt` para reprocessamento
 
 ## Convenções
 
