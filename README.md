@@ -193,5 +193,6 @@ Esta POC inclui dois projetos .NET com MediatR usados para demonstracao:
 - [poc-product-service](https://github.com/marcopollivier/poc-product-service) — API de produtos com CQRS/MediatR
 
 Ambos tiveram PRs de migracao abertas automaticamente por este framework:
+
 - [poc-order-service PR #1](https://github.com/marcopollivier/poc-order-service/pull/1)
 - [poc-product-service PR #1](https://github.com/marcopollivier/poc-product-service/pull/1)
