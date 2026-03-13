@@ -8,13 +8,17 @@ Framework genérico para executar migrações em massa em repositórios .NET usa
 .claude/
 ├── skills/
 │   ├── migrate/SKILL.md              # /migrate — orquestrador genérico
-│   └── migrate-mediatr/SKILL.md      # /migrate-mediatr — receita MediatR
+│   └── migrate-mediatr/
+│       ├── SKILL.md                  # /migrate-mediatr — receita MediatR
+│       └── detect.sh                 # detecta se o repo precisa da migração
 ├── agents/
 │   └── dotnet-migrator.md            # Executor isolado de migrações .NET
 ├── rules/
 │   └── dotnet.md                     # Padrões de código .NET (scoped *.cs)
 ├── settings.json                     # Hooks de guardrail
-repos.txt                             # Lista de repos (owner/repo, um por linha)
+repos.txt                             # Repos pendentes (owner/repo, um por linha)
+done.txt                              # Repos migrados com sucesso
+skipped.txt                           # Repos pulados (não-.NET ou sem necessidade)
 migrate.sh                            # Orquestrador shell para execução em massa
 ```
 
@@ -33,13 +37,30 @@ git pull → build → test → [criar testes] → [rodar testes] → aplicar mi
            └── hook valida build antes de prosseguir                            └── hook valida build+test antes de commit
 ```
 
+## Fluxo de triagem (antes de gastar créditos)
+
+```
+repos.txt
+   │
+   ├─── clone/pull repo
+   │
+   ├─── tem .csproj? ──── NÃO ──→ skipped.txt  (# not-dotnet)
+   │
+   ├─── detect.sh passa? ─ NÃO ──→ skipped.txt  (# not-needed:<tipo>)
+   │
+   └─── migrar via Claude ──→ sucesso → done.txt
+                              falha   → permanece em repos.txt (retry)
+```
+
 ## Migrações disponíveis
 
 | Skill | Descrição | Branch |
 |---|---|---|
 | `/migrate-mediatr` | Remove MediatR → dispatcher nativo | `migration/remove-mediatr` |
 
-Para adicionar uma nova migração, crie uma pasta em `.claude/skills/migrate-{nome}/SKILL.md`.
+Para adicionar uma nova migração, crie:
+- `.claude/skills/migrate-{nome}/SKILL.md` — receita da migração
+- `.claude/skills/migrate-{nome}/detect.sh` — retorna 0 se precisa migrar, 1 se já está ok
 
 ## Uso interativo
 
@@ -54,9 +75,20 @@ Para adicionar uma nova migração, crie uma pasta em `.claude/skills/migrate-{n
 ## Uso em massa (headless)
 
 ```bash
-# Edite repos.txt com os repositórios
-./migrate.sh mediatr repos.txt
+# Processa todos os repos de repos.txt
+./migrate.sh mediatr
+
+# Processa apenas 5 repos por vez (economiza créditos)
+./migrate.sh mediatr repos.txt --batch-size 5
+
+# Com paralelismo limitado
+./migrate.sh mediatr repos.txt --batch-size 5 --max-parallel 2
 ```
+
+Repos são removidos de `repos.txt` automaticamente após cada resultado:
+- **Migrado** → `done.txt`
+- **Pulado** (não-.NET ou sem necessidade) → `skipped.txt`
+- **Falhou** → permanece em `repos.txt` para reprocessamento
 
 ## Convenções
 
