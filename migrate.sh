@@ -267,9 +267,12 @@ migrate_repo() {
     echo -e "${YELLOW}[$repo_name]${NC} Starting migration..."
 
     # ── Run migration via Claude Code ──────────────────────────────
-    claude -p \
+    # Pipe prompt via stdin (more reliable in subshells than positional arg)
+    # Unset CLAUDECODE to allow nested sessions
+    env -u CLAUDECODE claude -p \
         --allowedTools "Bash,Read,Write,Edit,Glob,Grep" \
-        "You are the dotnet-migrator agent. Your task is to migrate the project at: $repo_dir
+        >> "$log_file" 2>&1 <<CLAUDE_PROMPT
+You are the dotnet-migrator agent. Your task is to migrate the project at: $repo_dir
 
 ## Migration Recipe (from skill migrate-${MIGRATION_TYPE})
 
@@ -294,8 +297,8 @@ IMPORTANT:
 - Work ONLY in $repo_dir
 - Discover the namespace from existing code
 - At the very end, output ONLY a JSON result:
-{\"repo\": \"$repo\", \"status\": \"success|failure\", \"pr_url\": \"...\", \"tests_passed\": N, \"tests_total\": N, \"errors\": []}" \
-        >> "$log_file" 2>&1
+{"repo": "$repo", "status": "success|failure", "pr_url": "...", "tests_passed": N, "tests_total": N, "errors": []}
+CLAUDE_PROMPT
 
     local exit_code=$?
 
